@@ -1,0 +1,9 @@
+requests==2.31.0
+pyspark==3.5.0
+pandas==2.1.4
+openpyxl==3.1.2
+python-dotenv==1.0.0
+
+
+# Required for PySpark to work with Delta Lake (Unity Catalog)
+# delta-spark==[IP_ADDRESS]
