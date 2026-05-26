@@ -20,6 +20,26 @@ logger = logging.getLogger("API.flow_c_service")
 _API_DIR = os.path.dirname(os.path.abspath(__file__))
 _ROOT    = os.path.abspath(os.path.join(_API_DIR, "..", ".."))
 
+# =============================================================================
+# GLOBAL IMPORT HIJACK FIX (The Nuclear Option)
+# This forces Python to load your custom MCA/llm.py into memory immediately. 
+# Any subsequent "import llm" in the agents will reuse this cached module 
+# instead of finding the broken global package in AppData.
+# =============================================================================
+_MCA_LLM_PATH = os.path.join(_ROOT, "MCA", "llm.py")
+if os.path.exists(_MCA_LLM_PATH):
+    # If the wrong one is already loaded, kick it out
+    if "llm" in sys.modules:
+        del sys.modules["llm"]
+    
+    # Force-load the correct local one
+    _spec = importlib.util.spec_from_file_location("llm", _MCA_LLM_PATH)
+    _llm_mod = importlib.util.module_from_spec(_spec)
+    sys.modules["llm"] = _llm_mod
+    _spec.loader.exec_module(_llm_mod)
+# =============================================================================
+
+
 _AGENT_PATHS = {
     "silver_vali":       os.path.join(_ROOT, "SILVER", "silver_agent", "silver_validation.py"),
     "silver_metadata":   os.path.join(_ROOT, "SILVER", "silver_agent", "silver_metadata.py"),
@@ -58,6 +78,11 @@ def _get_output_dir(session_id: str) -> str:
 
 # ── STEP 1: START ─────────────────────────────────────────────────────────────
 def run_flow_c_start(session_id: str, bronze_config: dict, silver_config: dict) -> dict:
+    # Fallback to prevent NoneType validation errors on FastAPI schemas
+    import uuid
+    if not session_id:
+        session_id = f"sess_{uuid.uuid4().hex[:8]}"
+
     output_dir = _get_output_dir(session_id)
     
     # 1. API Credentials Injection
@@ -90,15 +115,15 @@ def run_flow_c_start(session_id: str, bronze_config: dict, silver_config: dict) 
         json.dump(plan, f, indent=2)
     logger.info(f"API generated silver_credentials.json at {cred_path}")
     
-    # 2. Validation (FIXED FUNCTION NAME)
+    # 2. Validation
     mod_vali = _load("sc_vali", _AGENT_PATHS["silver_vali"])
     mod_vali.run_silver_validation(cred_path, output_dir)
     
-    # 3. Metadata (FIXED FUNCTION NAME)
+    # 3. Metadata
     mod_meta = _load("sc_meta", _AGENT_PATHS["silver_metadata"])
     metadata_data, metadata_path = mod_meta.run_silver_metadata(cred_path, output_dir)
     
-    # 4. Classifier (FIXED FUNCTION NAME)
+    # 4. Classifier
     mod_class = _load("sc_classifier", _AGENT_PATHS["silver_classifier"])
     classifier_output, classifier_path = mod_class.run_silver_classifier(metadata_path, output_dir)
     
@@ -108,6 +133,7 @@ def run_flow_c_start(session_id: str, bronze_config: dict, silver_config: dict) 
         "stage": "awaiting_taxonomy",
         "taxonomy_proposals": classifier_output.get("tables", [])
     }
+
 
 # ── STEP 2: TAXONOMY (Mocked for API isolation) ───────────────────────────────
 def run_flow_c_taxonomy(session_id: str, approved_taxonomy: dict) -> dict:
@@ -121,6 +147,7 @@ def run_flow_c_taxonomy(session_id: str, approved_taxonomy: dict) -> dict:
         "stage": "awaiting_transform",
         "transform_proposals": []
     }
+
 
 # ── STEP 3: TRANSFORM (Mocked for API isolation) ──────────────────────────────
 def run_flow_c_transform(session_id: str, table_name: str, columns: list) -> dict:
@@ -162,6 +189,7 @@ def run_flow_c_transform(session_id: str, table_name: str, columns: list) -> dic
         "proposed_table_name": schema_data["tables"][0]["table_name"],
         "ddl_preview": schema_data["tables"][0]["ddl"]
     }
+
 
 # ── STEP 4: EXECUTE ───────────────────────────────────────────────────────────
 def run_flow_c_execute(session_id: str, proposed_table: str, custom_table: str = None) -> dict:
