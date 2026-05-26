@@ -8,7 +8,10 @@ from typing import Optional, List
 class UserSelection(BaseModel):
     user_request: str = Field(..., description="Natural language prompt")
     flow_selection: Optional[str] = Field(None, description="Direct flow override (A-K)")
-    # ══════════════════════════════════════════════════════════════════════════
+    gold_bronze_source: Optional[str] = Field(None, description="Direct bronze source override (A-K)")
+    s3_bucket_count: Optional[int] = Field(1, description="Number of S3 buckets")
+    sql_db_count: Optional[int] = Field(1, description="Number of SQL databases")
+# ══════════════════════════════════════════════════════════════════════════
 # BASE CREDENTIAL BLOCKS
 # ══════════════════════════════════════════════════════════════════════════
 

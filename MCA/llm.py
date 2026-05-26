@@ -31,16 +31,22 @@ HOW TO FIND YOUR ENDPOINT NAME:
 import json
 import re
 import logging
+from dotenv import load_dotenv
 import requests
+from pathlib import Path
 import os
-
+ 
+# Resolves .env relative to this file's location — works on any machine
+_HERE = Path(__file__).resolve().parent
+load_dotenv(dotenv_path=_HERE.parent / ".env")
+ 
 DATABRICKS_HOST  = os.getenv("DATABRICKS_HOST", "").rstrip("/")
 DATABRICKS_TOKEN = os.getenv("DATABRICKS_TOKEN", "")
 
 # ── Actual endpoints discovered in your workspace ─────────────────────────────
 # These are the real endpoint names from your Databricks workspace.
 # Order = preference: largest/most capable first.
-MODEL_ENDPOINT   = "databricks-meta-llama-3.1-405b-instruct"  # best available
+MODEL_ENDPOINT   = "databricks-llama-4-maverick"  # best available
 
 FALLBACK_ENDPOINTS = [
     "databricks-meta-llama-3.1-405b-instruct",  # Llama 3.1 405B — most capable

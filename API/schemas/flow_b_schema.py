@@ -23,7 +23,7 @@ class AzureSQLCredentials(BaseModel):
     database: str           = Field(...,          description="Database name")
     username: str           = Field(...,          description="SQL login username")
     password: str           = Field(...,          description="SQL login password")
-    schema  : Optional[str] = Field(default="dbo", description="Source schema (default: dbo)")
+    schema_name  : Optional[str] = Field(default="dbo", description="Source schema (default: dbo)")
 
 
 # ── Databricks Destination Config ─────────────────────────────────────────────
@@ -33,7 +33,7 @@ class DatabricksConfig(BaseModel):
     databricks_warehouse_id : str = Field(..., description="SQL warehouse ID")
     databricks_token        : str = Field(..., description="Databricks personal access token")
     catalog                 : str = Field(..., description="Databricks catalog name")
-    schema                  : str = Field(..., description="Databricks schema name")
+    schema_name                  : str = Field(..., description="Databricks schema name")
 
 
 # ── Request ───────────────────────────────────────────────────────────────────

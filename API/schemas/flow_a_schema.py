@@ -33,7 +33,7 @@ class DatabricksConfig(BaseModel):
     databricks_warehouse_id:  str = Field(..., description="SQL warehouse ID")
     databricks_token:         str = Field(..., description="Databricks personal access token")
     catalog:                  str = Field(..., description="Databricks catalog name")
-    schema:                   str = Field(..., description="Databricks schema name")
+    schema_name:                   str = Field(..., description="Databricks schema name")
 
 
 # ── Request ───────────────────────────────────────────────────────────────────
