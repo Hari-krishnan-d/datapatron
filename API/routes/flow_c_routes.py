@@ -1,53 +1,44 @@
 """
-API/routes/flow_c_routes.py — Flow C Router
+API/routes/flow_c_routes.py
 ============================================
-Endpoints for interactive Flow C (Bronze → Silver).
-Requires 4 sequential steps to handle user interactions.
+5-Step API workflow using HTTP Cookies for automatic state tracking.
 """
 
 import logging
-from fastapi import APIRouter, HTTPException, status, Response, Cookie
+from fastapi import APIRouter, Cookie, Response, HTTPException, status
 
 from API.schemas.flow_c_schema import (
     FlowCStartRequest,
     FlowCStartResponse,
-    FlowCTaxonomyRequest,
-    FlowCTaxonomyResponse,
+    ApplyTaxonomyRequest,
+    ApplyTaxonomyResponse,
     FlowCTransformRequest,
-    FlowCTransformResponse,
-    FlowCExecuteRequest,
-    FlowCExecuteResponse,
+    TransformResponse,
+    ExecuteRequest,
+    ExecuteResponse
 )
 from API.services.flow_c_service import (
-    run_flow_c_start,
-    run_flow_c_taxonomy,
-    run_flow_c_transform,
-    run_flow_c_execute,
+    start_session_service,
+    taxonomy_service,
+    apply_taxonomy_service,
+    transform_service,
+    execute_service
 )
 
 logger = logging.getLogger("API.flow_c_routes")
-
 router = APIRouter(prefix="/flow-c", tags=["Flow C — Bronze → Silver"])
 
-
-# =============================================================================
-# POST /flow-c/start
-# =============================================================================
-@router.post(
-    "/start",
-    response_model=FlowCStartResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Step 1: Start Flow C & Extract Taxonomy Proposals",
-)
-async def start_flow_c(request: FlowCStartRequest, response: Response):
-    logger.info("POST /flow-c/start — session=%s", request.session_id)
+# ── STEP 1: START ─────────────────────────────────────────────────────────────
+@router.post("/start", response_model=FlowCStartResponse, summary="1. Start Session")
+async def start(request: FlowCStartRequest, response: Response):
     try:
-        result = run_flow_c_start(
-            session_id=request.session_id,
-            bronze_config=request.bronze_config.model_dump(),
-            silver_config=request.silver_config.model_dump(),
+        # Pass the configs from the request body into the service
+        result = start_session_service(
+            bronze_config=request.bronze_config.model_dump(), 
+            silver_config=request.silver_config.model_dump()
         )
-        # Set the session_id as an HTTP-only cookie automatically detected by Postman
+        
+        # INJECT INVISIBLE COOKIE HERE
         response.set_cookie(
             key="flow_c_session_id",
             value=result["session_id"],
@@ -55,101 +46,74 @@ async def start_flow_c(request: FlowCStartRequest, response: Response):
             samesite="lax"
         )
         return result
-    except ValueError as exc:
-        logger.warning("Flow C start — validation error: %s", exc)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    except Exception as exc:
-        logger.exception("Flow C start — unexpected error: %s", exc)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+    except Exception as e:
+        logger.error(f"Start Session Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-
-# =============================================================================
-# POST /flow-c/taxonomy
-# =============================================================================
-@router.post(
-    "/taxonomy",
-    response_model=FlowCTaxonomyResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Step 2: Submit Taxonomy & Get Transform Proposals",
-)
-async def submit_taxonomy(request: FlowCTaxonomyRequest, flow_c_session_id: str = Cookie(None)):
+# ── STEP 2: TAXONOMY (GET) ────────────────────────────────────────────────────
+@router.get("/taxonomy", summary="2. Get Taxonomy & Proposed Schema")
+async def taxonomy(flow_c_session_id: str = Cookie(None)):
     if not flow_c_session_id:
-        raise HTTPException(status_code=401, detail="Session missing. Call /start first.")
-        
-    logger.info("POST /flow-c/taxonomy — session=%s", flow_c_session_id)
+        raise HTTPException(status_code=401, detail="Session cookie missing. Call /start first.")
     try:
-        approved_tax = {
-            k: [item.model_dump() for item in v] if isinstance(v, list) else v
-            for k, v in request.approved_taxonomy.items()
-        }
-        
-        result = run_flow_c_taxonomy(
+        return taxonomy_service(flow_c_session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Taxonomy Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ── STEP 3: APPLY EDITS ───────────────────────────────────────────────────────
+@router.post("/apply-taxonomy", response_model=ApplyTaxonomyResponse, summary="3. Apply User Edits")
+async def apply_taxonomy(
+    req: ApplyTaxonomyRequest, 
+    flow_c_session_id: str = Cookie(None)
+):
+    if not flow_c_session_id:
+        raise HTTPException(status_code=401, detail="Session cookie missing. Call /start first.")
+    try:
+        return apply_taxonomy_service(
             session_id=flow_c_session_id,
-            approved_taxonomy=approved_tax,
+            edited_taxonomy=req.edited_taxonomy,
+            edited_schema=req.edited_schema
         )
-        return result
-    except ValueError as exc:
-        logger.warning("Flow C taxonomy — validation error: %s", exc)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    except Exception as exc:
-        logger.exception("Flow C taxonomy — unexpected error: %s", exc)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Apply Taxonomy Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-
-# =============================================================================
-# POST /flow-c/transform
-# =============================================================================
-@router.post(
-    "/transform",
-    response_model=FlowCTransformResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Step 3: Submit Transforms & Get Schema DDL",
-)
-async def submit_transform(request: FlowCTransformRequest, flow_c_session_id: str = Cookie(None)):
+# ── STEP 4: TRANSFORM ─────────────────────────────────────────────────────────
+@router.post("/transform", response_model=TransformResponse, summary="4. Generate SQL & Preview")
+async def transform(request: FlowCTransformRequest, flow_c_session_id: str = Cookie(None)):
     if not flow_c_session_id:
-        raise HTTPException(status_code=401, detail="Session missing. Call /start first.")
-        
-    logger.info("POST /flow-c/transform — session=%s", flow_c_session_id)
+        raise HTTPException(status_code=401, detail="Session cookie missing. Call /start first.")
     try:
-        columns_dump = [col.model_dump() for col in request.columns]
-        result = run_flow_c_transform(
+        # Pass the table_name and columns from the JSON body to the service
+        return transform_service(
             session_id=flow_c_session_id,
             table_name=request.table_name,
-            columns=columns_dump,
+            columns=request.model_dump()["columns"]
         )
-        return result
-    except ValueError as exc:
-        logger.warning("Flow C transform — validation error: %s", exc)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    except Exception as exc:
-        logger.exception("Flow C transform — unexpected error: %s", exc)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Transform Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-
-# =============================================================================
-# POST /flow-c/execute
-# =============================================================================
-@router.post(
-    "/execute",
-    response_model=FlowCExecuteResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Step 4: Execute Table Creation & Generate Migration Plan",
-)
-async def execute_flow_c(request: FlowCExecuteRequest, flow_c_session_id: str = Cookie(None)):
+# ── STEP 5: EXECUTE ───────────────────────────────────────────────────────────
+@router.post("/execute", response_model=ExecuteResponse, summary="5. Execute Final Table Creation")
+async def execute(request: ExecuteRequest, flow_c_session_id: str = Cookie(None)):
     if not flow_c_session_id:
-        raise HTTPException(status_code=401, detail="Session missing. Call /start first.")
-        
-    logger.info("POST /flow-c/execute — session=%s", flow_c_session_id)
+        raise HTTPException(status_code=401, detail="Session cookie missing. Call /start first.")
     try:
-        result = run_flow_c_execute(
+        return execute_service(
             session_id=flow_c_session_id,
             proposed_table=request.proposed_table_name,
-            custom_table=request.custom_table_name,
+            custom_table=request.custom_table_name
         )
-        return result
-    except ValueError as exc:
-        logger.warning("Flow C execute — validation error: %s", exc)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    except Exception as exc:
-        logger.exception("Flow C execute — unexpected error: %s", exc)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Execute Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

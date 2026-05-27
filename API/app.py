@@ -7,13 +7,13 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
- 
-# --- DYNAMIC PATH SETUP (Cross-Platform) ---
+  # --- DYNAMIC PATH SETUP (Cross-Platform) ---
 # 1. Get the directory of this current script
-_API_DIR = Path(__file__).resolve().parent  # API/services/
- 
-# 2. Go up two levels to get to the project root
-_ROOT = _API_DIR.parent.parent
+
+_API_DIR = Path(__file__).resolve().parent  # API/
+
+# 2. Go up ONE level to get to the project root
+_ROOT = _API_DIR.parent
  
 # 3. Add _API_DIR to sys.path so Python can find your 'routes' folder
 sys.path.insert(0, str(_API_DIR))
