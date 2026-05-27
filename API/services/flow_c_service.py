@@ -182,8 +182,7 @@ def execute_service(session_id: str, proposed_table: str, custom_table: str = No
     transform_path = os.path.join(output_dir, "transform_plan.json")
     status_path = os.path.join(output_dir, "silver_table_creation_status.json")
 
-    # If the user provided a custom name, dynamically inject it into the schema JSON
-    # so the legacy agent automatically creates it under the custom name.
+    # 1. Update Schema File with Custom Table Name (if provided)
     if custom_table and custom_table != proposed_table:
         custom_raw = custom_table.split(".")[-1]
         with open(schema_path, "r", encoding="utf-8") as f:
@@ -194,8 +193,56 @@ def execute_service(session_id: str, proposed_table: str, custom_table: str = No
             with open(schema_path, "w", encoding="utf-8") as f:
                 json.dump(s_data, f, indent=2)
 
-    # 1. Execute Table Creation (Bypass input() using auto_approve=True)
+    # 2. Load the Table Agent to access its SQL execution capabilities
     mod_table = _load("sc_table", _AGENT_PATHS["table"])
+    
+    # Extract credentials to manually build the Taxonomy Table
+    with open(cred_path, "r", encoding="utf-8") as f:
+        creds = json.load(f)
+    dest = creds["pipelines"][0]["destination"]
+    
+    catalog = dest["catalog"]
+    schema = dest["schema"]
+    workspace_url = dest["workspace_url"]
+    warehouse_id = dest["warehouse_id"]
+    token = dest["token"]
+
+    # 3. Create Catalog & Schema explicitly (Logs errors if token lacks permissions)
+    try:
+        mod_table._execute_sql(workspace_url, warehouse_id, token, f"CREATE CATALOG IF NOT EXISTS {catalog}")
+        mod_table._execute_sql(workspace_url, warehouse_id, token, f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}")
+    except Exception as e:
+        logger.error(f"Failed to create Catalog/Schema. Ensure your token has Metastore Admin rights: {e}")
+
+    # 4. Create and Populate `silver_taxonomy_lookup` from API State
+    edited_tax = state.get("edited_taxonomy", {})
+    if edited_tax:
+        tax_table = f"{catalog}.{schema}.silver_taxonomy_lookup"
+        
+        # Create the table structure
+        mod_table._execute_sql(workspace_url, warehouse_id, token, f"""
+            CREATE TABLE IF NOT EXISTS {tax_table} (
+                column_name STRING,
+                raw_value STRING,
+                canonical_value STRING
+            ) USING DELTA
+        """)
+        
+        # Build SQL Insert values from frontend edits
+        values = []
+        for col, mappings in edited_tax.items():
+            for raw, canon in mappings.items():
+                raw_safe = raw.replace("'", "''")
+                canon_safe = canon.replace("'", "''")
+                values.append(f"('{col}', '{raw_safe}', '{canon_safe}')")
+                
+        if values:
+            # Wipe existing rows for these columns to prevent duplicates, then insert new mappings
+            mod_table._execute_sql(workspace_url, warehouse_id, token, f"DELETE FROM {tax_table} WHERE column_name IN ({','.join([f'{chr(39)}{k}{chr(39)}' for k in edited_tax.keys()])})")
+            insert_sql = f"INSERT INTO {tax_table} VALUES {','.join(values)}"
+            mod_table._execute_sql(workspace_url, warehouse_id, token, insert_sql)
+
+    # 5. Execute Main Table Creation (Bypass input() using auto_approve=True)
     mod_table.run_silver_table_creation(
         schema_path=schema_path,
         silver_credentials_path=cred_path,
@@ -203,7 +250,7 @@ def execute_service(session_id: str, proposed_table: str, custom_table: str = No
         auto_approve=True 
     )
     
-    # 2. Execute Final Generator
+    # 6. Execute Final Generator
     mod_final = _load("sc_final", _AGENT_PATHS["final"])
     mod_final.run_silver_final_gen(
         credentials_path=cred_path,
@@ -217,4 +264,4 @@ def execute_service(session_id: str, proposed_table: str, custom_table: str = No
     save_session(session_id, state)
     
     table_created = custom_table if custom_table else proposed_table
-    return {"status": "success", "message": f"Silver table {table_created} deployed successfully."}
+    return {"status": "success", "message": f"Silver table {table_created} and taxonomy lookup deployed successfully."}
