@@ -2,12 +2,6 @@
 API/schemas/flow_c_schema.py — Flow C Request & Response Models
 ================================================================
 Flow C = Bronze (Databricks) → Silver (Databricks)
-
-This flow is interactive. It requires 4 sequential API calls:
-  1. /start     -> Returns Taxonomy proposals
-  2. /taxonomy  -> Returns Transform proposals
-  3. /transform -> Returns Schema DDL / Table name prompt
-  4. /execute   -> Finalizes Table Creation & Migration Plan
 """
 
 import uuid
@@ -49,7 +43,6 @@ class FlowCStartResponse(BaseModel):
 # ── STEP 2: TAXONOMY ──────────────────────────────────────────────────────────
 
 class FlowCTaxonomyRequest(BaseModel):
-    session_id:        str = Field(..., description="Unique session ID to track state")
     approved_taxonomy: Dict[str, Union[List[TaxonomyGroup], Literal["SKIP"]]] = Field(
         description="User-edited taxonomy groups. Send 'SKIP' to skip a column."
     )
@@ -63,7 +56,7 @@ class TransformProposal(BaseModel):
     null_percentage: float
     null_options:    List[Dict[str, Any]] = Field(
         default_factory=list, 
-        description="Dynamic list of null handling options based on data type (9 for numeric, 5 for string)."
+        description="Dynamic list of null handling options based on data type."
     )
 
 class FlowCTaxonomyResponse(BaseModel):
@@ -85,7 +78,6 @@ class ColumnTransform(BaseModel):
     fill_value:    Optional[str] = None
 
 class FlowCTransformRequest(BaseModel):
-    session_id: str = Field(..., description="Unique session ID to track state")
     table_name: str
     columns:    List[ColumnTransform] = Field(description="Must contain exactly 30 columns based on previous step")
 
@@ -99,7 +91,6 @@ class FlowCTransformResponse(BaseModel):
 # ── STEP 4: EXECUTE ───────────────────────────────────────────────────────────
 
 class FlowCExecuteRequest(BaseModel):
-    session_id:          str = Field(..., description="Unique session ID to track state")
     proposed_table_name: str
     custom_table_name:   Optional[str] = Field(default=None, description="Provide to override proposed name")
 
