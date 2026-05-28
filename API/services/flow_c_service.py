@@ -1,6 +1,7 @@
 """
 API/services/flow_c_service.py
 Integration of 5-Step API Workflow with real Silver Agents.
+Includes exact Databricks taxonomy table schema and INSTANT taxonomy commits.
 """
 
 import os
@@ -12,6 +13,7 @@ import importlib.util
 import difflib
 import time
 import requests
+from datetime import datetime, timezone
 from typing import Dict, Any
 
 logger = logging.getLogger("API.flow_c_service")
@@ -57,7 +59,7 @@ def save_session(session_id: str, state: Dict[str, Any]):
     path = os.path.join(SESSION_OUTPUT_DIR, f"{session_id}.json")
     with open(path, "w", encoding="utf-8") as f: json.dump(state, f, indent=2)
 
-# ── REST API DATABRICKS EXECUTION (Matching silver_table.py) ──────────────────
+# ── REST API DATABRICKS EXECUTION ─────────────────────────────────────────────
 def _exec_databricks_sql(workspace_url: str, warehouse_id: str, token: str, query: str) -> list:
     try:
         workspace_url = workspace_url.rstrip("/")
@@ -83,7 +85,6 @@ def _exec_databricks_sql(workspace_url: str, warehouse_id: str, token: str, quer
         state  = result.get("status", {}).get("state", "")
 
         def extract_rows(res_json):
-            # Databricks REST API returns data under result -> data_array
             return res_json.get("result", {}).get("data_array", [])
 
         if state == "SUCCEEDED":
@@ -163,23 +164,33 @@ def start_session_service(bronze_config: dict, silver_config: dict):
     cred_path = os.path.join(output_dir, "silver_credentials.json")
     with open(cred_path, "w", encoding="utf-8") as f: json.dump(cred_data, f, indent=2)
     
-    # 1. Run Validation, Metadata, and Classifier
     _load("sc_vali", _AGENT_PATHS["vali"]).run_silver_validation(cred_path, output_dir)
     _, meta_path = _load("sc_meta", _AGENT_PATHS["meta"]).run_silver_metadata(cred_path, output_dir)
     _, class_path = _load("sc_class", _AGENT_PATHS["class"]).run_silver_classifier(meta_path, output_dir)
     
-    # 2. CREATE CATALOG AND SCHEMA HERE (Matches CLI timing before Mapping Agent)
-    print(f"\n  Preparing taxonomy table at {s_catalog}.{s_schema}…\n")
     logger.info(f"Preparing taxonomy table at {s_catalog}.{s_schema}…")
     _exec_databricks_sql(workspace, warehouse, token, f"CREATE CATALOG IF NOT EXISTS `{s_catalog}`")
     _exec_databricks_sql(workspace, warehouse, token, f"CREATE SCHEMA IF NOT EXISTS `{s_catalog}`.`{s_schema}`")
+    
+    tax_table = f"`{s_catalog}`.`{s_schema}`.silver_taxonomy_lookup"
+    _exec_databricks_sql(workspace, warehouse, token, f"""
+        CREATE TABLE IF NOT EXISTS {tax_table} (
+            source_schema      STRING,
+            source_table       STRING,
+            source_column      STRING,
+            raw_value          STRING,
+            standardized_value STRING,
+            data_type          STRING,
+            confidence         STRING,
+            last_updated       TIMESTAMP
+        ) USING DELTA""")
 
     save_session(session_id, {
         "session_id": session_id, "output_dir": output_dir, "cred_path": cred_path, 
         "bronze": bronze_config, "silver": silver_dest, "stage": "started"
     })
     
-    return {"status": "session_started", "session_id": session_id, "message": "Profiling complete and Silver catalog created."}
+    return {"status": "session_started", "session_id": session_id, "message": "Profiling complete and empty taxonomy table created."}
 
 # ── STEP 2: TAXONOMY GENERATION (GET) ─────────────────────────────────────────
 def generate_taxonomy_proposals(session_id: str):
@@ -207,7 +218,6 @@ def generate_taxonomy_proposals(session_id: str):
         query = f"SELECT DISTINCT `{col}` FROM `{b_cat}`.`{b_sch}`.`{b_tbl}` WHERE `{col}` IS NOT NULL"
         rows = _exec_databricks_sql(workspace, warehouse, token, query)
         
-        # rows will be a list of lists, e.g. [["Male"], ["Female"]]
         distinct_vals = [r[0] for r in rows if r and r[0]]
         
         col_mappings = {}
@@ -225,37 +235,102 @@ def generate_taxonomy_proposals(session_id: str):
         "proposed_mappings": proposed_mappings
     }
 
-# ── STEP 3: APPLY TAXONOMY ────────────────────────────────────────────────────
+# ── STEP 3: APPLY TAXONOMY (NOW WITH INSTANT DATABRICKS SYNC) ─────────────────
 def apply_taxonomy_service(session_id: str, edited_taxonomy: dict):
     state = get_session(session_id)
+    
+    # Save to local session
     state["edited_taxonomy"] = edited_taxonomy
     save_session(session_id, state)
-    return {"status": "success", "message": "Taxonomy saved.", "session_id": session_id}
+
+    # Instantly sync to Databricks (Matching CLI behavior)
+    if edited_taxonomy:
+        dest = state["silver"]
+        workspace, warehouse, token = dest["workspace_url"], dest["warehouse_id"], dest["token"]
+        catalog, schema = dest["catalog"], dest["schema"]
+        
+        tax_table = f"`{catalog}`.`{schema}`.silver_taxonomy_lookup"
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        
+        b_schema = state["bronze"].get("schema", state["bronze"].get("schema_name", "bronze"))
+        b_table = state["bronze"]["table"]
+        
+        rows = []
+        for col, mappings in edited_taxonomy.items():
+            for raw, canon in mappings.items():
+                # Escape single quotes for SQL
+                raw_safe = str(raw).replace("'", "''")
+                canon_safe = str(canon).replace("'", "''")
+                rows.append(f"('{b_schema}', '{b_table}', '{col}', '{raw_safe}', '{canon_safe}', 'STRING', 'high', TO_TIMESTAMP('{now_str}'))")
+                
+        if rows:
+            # Wipe existing taxonomy for these columns to prevent duplicates
+            cols_str = ",".join([f"'{k}'" for k in edited_taxonomy.keys()])
+            _exec_databricks_sql(workspace, warehouse, token, f"DELETE FROM {tax_table} WHERE source_table='{b_table}' AND source_column IN ({cols_str})")
+            
+            # Insert the new mappings
+            insert_sql = f"""
+                INSERT INTO {tax_table} 
+                (source_schema, source_table, source_column, raw_value, standardized_value, data_type, confidence, last_updated)
+                VALUES {','.join(rows)}
+            """
+            _exec_databricks_sql(workspace, warehouse, token, insert_sql)
+            
+    return {"status": "success", "message": "Taxonomy saved and instantly pushed to Databricks.", "session_id": session_id}
 
 # ── STEP 4: TRANSFORM ─────────────────────────────────────────────────────────
 def transform_service(session_id: str, table_name: str, columns: list):
     state = get_session(session_id)
     output_dir = state["output_dir"]
     
+    # 1. Map API keys to the exact keys expected by the internal Databricks agents
+    agent_columns = []
+    for col in columns:
+        # Handle dict vs Pydantic model depending on how FastAPI passes it
+        if hasattr(col, "model_dump"): 
+            col = col.model_dump()
+            
+        agent_columns.append({
+            "source_column": col.get("source_column", ""),
+            "target_column": col.get("silver_column", ""), # Agent expects 'target_column'
+            "target_type":   col.get("silver_type", "STRING"),   # Agent expects 'target_type'
+            "null_handling": col.get("null_strategy", "keep"), # Agent expects 'null_handling'
+            "fill_value":    col.get("fill_value", "")
+        })
+    
+    # 2. Build the transform plan
     transform_plan = {
         "session_id": session_id,
         "tables": [{
             "pipeline_id": f"{session_id}_silver_001",
             "table": table_name.split('.')[-1],
             "full_table": table_name,
-            "columns": columns,
+            "columns": agent_columns,
             "operations": {
-                "remove_nulls": False, "drop_duplicates": True, "standardize_names": True,
-                "cast_types": True, "null_handling": { "replace_placeholders": True, "drop_if_all_columns_null": True, "keep_partial_nulls": True }
+                "remove_nulls": False, 
+                "drop_duplicates": True, 
+                "standardize_names": True,
+                "cast_types": True, 
+                "null_handling": { 
+                    "replace_placeholders": True, 
+                    "drop_if_all_columns_null": True, 
+                    "keep_partial_nulls": True 
+                }
             }
         }]
     }
     
     transform_path = os.path.join(output_dir, "transform_plan.json")
-    with open(transform_path, "w", encoding="utf-8") as f: json.dump(transform_plan, f, indent=2)
+    with open(transform_path, "w", encoding="utf-8") as f: 
+        json.dump(transform_plan, f, indent=2)
     
     meta_path = os.path.join(output_dir, "silver_metadata.json")
-    schema_data, _ = _load("sc_schema", _AGENT_PATHS["schema"]).run_silver_schema(transform_plan_path=transform_path, metadata_path=meta_path, output_dir=output_dir)
+    mod_schema = _load("sc_schema", _AGENT_PATHS["schema"])
+    schema_data, _ = mod_schema.run_silver_schema(
+        transform_plan_path=transform_path, 
+        metadata_path=meta_path, 
+        output_dir=output_dir
+    )
     
     ddl_preview = schema_data["tables"][0]["ddl"]
     state["ddl"] = ddl_preview
@@ -264,48 +339,54 @@ def transform_service(session_id: str, table_name: str, columns: list):
     return {"status": "transform_completed", "ddl_preview": ddl_preview}
 
 # ── STEP 5: EXECUTE ───────────────────────────────────────────────────────────
-def execute_service(session_id: str, final_table_name: str):
+def execute_service(session_id: str, proposed_table: str, custom_table: str = None):
     state = get_session(session_id)
     output_dir = state["output_dir"]
     cred_path = state["cred_path"]
     schema_path = os.path.join(output_dir, "silver_schema.json")
+    transform_path = os.path.join(output_dir, "transform_plan.json")
     
     dest = state["silver"]
-    workspace, warehouse, token = dest["workspace_url"], dest["warehouse_id"], dest["token"]
     catalog, schema = dest["catalog"], dest["schema"]
 
-    with open(schema_path, "r", encoding="utf-8") as f: s_data = json.load(f)
-    old_table = s_data["tables"][0]["table_name"]
-    final_table_raw = final_table_name.split(".")[-1]
-    
-    s_data["tables"][0]["table_name"] = final_table_raw
-    s_data["tables"][0]["ddl"] = s_data["tables"][0]["ddl"].replace(old_table, final_table_raw)
-    with open(schema_path, "w", encoding="utf-8") as f: json.dump(s_data, f, indent=2)
+    # 1. Determine final table name (Custom overrides Proposed)
+    final_table_raw = custom_table.strip() if custom_table else proposed_table.strip()
+    final_table_raw = final_table_raw.split(".")[-1] # Ensure bare table name
 
-    edited_tax = state.get("edited_taxonomy", {})
-    if edited_tax:
-        tax_table = f"`{catalog}`.`{schema}`.`silver_taxonomy_lookup`"
-        _exec_databricks_sql(workspace, warehouse, token, f"CREATE TABLE IF NOT EXISTS {tax_table} (column_name STRING, raw_value STRING, canonical_value STRING) USING DELTA")
+    # 2. Update DDL in silver_schema.json if the user altered the name
+    with open(schema_path, "r", encoding="utf-8") as f: 
+        s_data = json.load(f)
         
-        values = []
-        for col, mappings in edited_tax.items():
-            for raw, canon in mappings.items():
-                values.append(f"('{col}', '{raw.replace(chr(39), chr(39)*2)}', '{canon.replace(chr(39), chr(39)*2)}')")
-                
-        if values:
-            cols_str = ",".join([f"'{k}'" for k in edited_tax.keys()])
-            _exec_databricks_sql(workspace, warehouse, token, f"DELETE FROM {tax_table} WHERE column_name IN ({cols_str})")
-            _exec_databricks_sql(workspace, warehouse, token, f"INSERT INTO {tax_table} VALUES {','.join(values)}")
+    old_table = s_data["tables"][0]["table_name"]
+    
+    if old_table != final_table_raw:
+        s_data["tables"][0]["table_name"] = final_table_raw
+        s_data["tables"][0]["ddl"] = s_data["tables"][0]["ddl"].replace(old_table, final_table_raw)
+        with open(schema_path, "w", encoding="utf-8") as f: 
+            json.dump(s_data, f, indent=2)
 
-    _load("sc_table", _AGENT_PATHS["table"]).run_silver_table_creation(
-        schema_path=schema_path, silver_credentials_path=cred_path, session_config_path=None, output_dir=output_dir, auto_approve=True 
+    # 3. Trigger Table Creation Agent (auto_approve=True bypasses CLI inputs)
+    # Note: silver_table.py natively handles Catalog and Schema creation before table creation.
+    mod_table = _load("sc_table", _AGENT_PATHS["table"])
+    status_dict, status_path = mod_table.run_silver_table_creation(
+        schema_path=schema_path, 
+        silver_credentials_path=cred_path, 
+        session_config_path=None, 
+        output_dir=output_dir, 
+        auto_approve=True 
     )
     
-    status_path = os.path.join(output_dir, "silver_table_creation_status.json")
-    _load("sc_final", _AGENT_PATHS["final"]).run_silver_final_gen(
-        credentials_path=cred_path, table_creation_path=status_path,
-        transform_plan_path=os.path.join(output_dir, "transform_plan.json"), 
-        schema_path=schema_path, output_dir=output_dir
+    # 4. Trigger Final Migration Plan Generator
+    mod_final = _load("sc_final", _AGENT_PATHS["final"])
+    mod_final.run_silver_final_gen(
+        credentials_path=cred_path, 
+        table_creation_path=status_path,
+        transform_plan_path=transform_path, 
+        schema_path=schema_path, 
+        output_dir=output_dir
     )
     
-    return {"status": "success", "message": f"Table {final_table_raw} deployed to {catalog}.{schema} successfully."}
+    return {
+        "status": "success", 
+        "message": f"Table {catalog}.{schema}.{final_table_raw} deployed successfully and migration plan generated."
+    }

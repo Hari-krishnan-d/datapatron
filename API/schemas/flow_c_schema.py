@@ -68,7 +68,8 @@ class TransformResponse(BaseModel):
 
 # ── STEP 4: EXECUTE ──
 class ExecuteRequest(BaseModel):
-    final_table_name: str
+    proposed_table_name: str
+    custom_table_name: Optional[str] = None  # User-provided final name
 
 class ExecuteResponse(BaseModel):
     status: Literal["success", "failed"]

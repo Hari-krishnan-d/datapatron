@@ -62,11 +62,19 @@ async def transform(request: FlowCTransformRequest, flow_c_session_id: str = Coo
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/execute", response_model=ExecuteResponse, summary="5. Deploy Tables to Databricks")
+# ── STEP 5: EXECUTE ───────────────────────────────────────────────────────────
+@router.post("/execute", response_model=ExecuteResponse, summary="5. Execute Final Table Creation")
 async def execute(request: ExecuteRequest, flow_c_session_id: str = Cookie(None)):
     if not flow_c_session_id:
-        raise HTTPException(status_code=401, detail="Session cookie missing.")
+        raise HTTPException(status_code=401, detail="Session cookie missing. Call /start first.")
     try:
-        return execute_service(flow_c_session_id, request.final_table_name)
+        return execute_service(
+            session_id=flow_c_session_id,
+            proposed_table=request.proposed_table_name,
+            custom_table=request.custom_table_name
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        logger.error(f"Execute Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
